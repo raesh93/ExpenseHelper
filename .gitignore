@@ -8,6 +8,9 @@ venv/
 # Output
 output/
 
+# Sensitive PDFs
+encrypted_pdf/*.pdf
+
 # macOS
 .DS_Store
 
