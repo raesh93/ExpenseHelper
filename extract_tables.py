@@ -14,17 +14,47 @@ from typing import List, Dict, Tuple
 
 class PDFTableExtractor:
     """Extract and process tables from PDF documents."""
-    
+
     def __init__(self, pdf_path: str):
         self.pdf_path = pdf_path
         self.tables: List[pd.DataFrame] = []
         self.table_schemas: List[Tuple[str, ...]] = []
-        
+
+    def _get_password_from_filename(self) -> str:
+        """Extract password from filename (last segment when split by '_')."""
+        filename = Path(self.pdf_path).stem  # Get filename without extension
+        parts = filename.split('_')
+        return parts[-1] if parts else ""
+
+    def _open_pdf(self):
+        """Open PDF, handling password-protected files."""
+        password = self._get_password_from_filename()
+
+        # Try opening without password first
+        try:
+            pdf = pdfplumber.open(self.pdf_path)
+            # Check if PDF is readable (some encrypted PDFs open but can't be read)
+            _ = len(pdf.pages)
+            return pdf
+        except Exception:
+            pass
+
+        # Try with password extracted from filename
+        if password:
+            try:
+                pdf = pdfplumber.open(self.pdf_path, password=password)
+                print(f"  🔓 Opened with password from filename")
+                return pdf
+            except Exception as e:
+                raise Exception(f"Failed to open PDF (tried password '{password}'): {e}")
+
+        raise Exception("Failed to open PDF - may be encrypted")
+
     def extract_tables(self) -> List[pd.DataFrame]:
         """Extract transaction tables from the PDF using both table and text extraction."""
         print(f"Extracting tables from: {self.pdf_path}")
-        
-        with pdfplumber.open(self.pdf_path) as pdf:
+
+        with self._open_pdf() as pdf:
             print(f"Total pages: {len(pdf.pages)}")
             
             all_transactions = []
