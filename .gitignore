@@ -10,6 +10,7 @@ output/
 
 # Sensitive PDFs
 encrypted_pdf/*.pdf
+decrypted/
 
 # macOS
 .DS_Store
