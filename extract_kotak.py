@@ -75,6 +75,10 @@ class KotakExtractor:
         df = df.drop_duplicates(subset=['Date', 'Description', 'Amount'], keep='first')
         print(f"\nTotal unique transactions: {len(df)}")
 
+        # Filter to savings account only (exclude term deposit transactions)
+        df = self.filter_savings_account(df)
+        print(f"Filtered to savings account: {len(df)} transactions")
+
         return df
 
     def _parse_transactions(self, text: str) -> List[dict]:
@@ -201,14 +205,12 @@ class KotakExtractor:
         savings_df = df[~df['Description'].apply(is_term_deposit)]
         return savings_df
 
-    def save_results(self, df: pd.DataFrame, output_dir: str = "output", savings_only: bool = True):
+    def save_results(self, df: pd.DataFrame, output_dir: str = "output"):
         """Save the extracted transactions."""
         if df.empty:
             return
 
-        if savings_only:
-            df = self.filter_savings_account(df).copy()
-            print(f"Filtered to savings account: {len(df)} transactions")
+        df = df.copy()
 
         pdf_name = Path(self.pdf_path).stem
         output_folder = os.path.join(output_dir, pdf_name)

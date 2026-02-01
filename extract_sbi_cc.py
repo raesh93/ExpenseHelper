@@ -72,8 +72,8 @@ class SBICCExtractor:
             return pd.DataFrame()
 
         df = pd.DataFrame(self.transactions)
-        df = df.drop_duplicates(subset=['Date', 'Description', 'Amount', 'Type'], keep='first')
-        print(f"\nTotal unique transactions: {len(df)}")
+        # Don't deduplicate - duplicate fees on same date are legitimate
+        print(f"\nTotal transactions: {len(df)}")
 
         return df
 

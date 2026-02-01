@@ -75,11 +75,17 @@ class BOBExtractor:
         return df
 
     def _parse_text(self, text: str) -> List[dict]:
-        """Parse transactions from text."""
+        """Parse transactions from text.
+
+        BOB format: narration line comes BEFORE the date line:
+        Line N:   ACHCR/COMPANY_NAME (narration)
+        Line N+1: DD-MM-YYYY amount balance Cr (date, amount, balance)
+        Line N+2: REFERENCE_NUMBER (optional continuation)
+        """
         transactions = []
         lines = text.split('\n')
 
-        # Date pattern: DD-MM-YYYY
+        # Date pattern: DD-MM-YYYY followed by amounts
         date_pattern = r'^(\d{2}-\d{2}-\d{4})\s+'
         # Amount pattern: number with optional commas and decimal
         amount_pattern = r'([\d,]+\.\d{2})'
@@ -102,63 +108,51 @@ class BOBExtractor:
                 i += 1
                 continue
 
-            # Collect narration (may span multiple lines)
-            narration_parts = []
-            amounts = []
-
-            # Parse the first line
-            # Find amounts at the end
-            all_amounts = re.findall(amount_pattern, rest)
-            if all_amounts:
-                # Get the position of first amount to extract narration
-                first_amount_pos = rest.find(all_amounts[0])
-                narration_parts.append(rest[:first_amount_pos].strip())
-                amounts = all_amounts
-            else:
-                narration_parts.append(rest)
-
-            # Check next lines for continuation of narration or amounts
-            i += 1
-            while i < len(lines):
-                next_line = lines[i].strip()
-                # If next line starts with date, we're done with this transaction
-                if re.match(date_pattern, next_line):
-                    break
-                # If it's a page header/footer or empty, skip
-                if not next_line or 'Page' in next_line or 'Balance' in next_line:
-                    i += 1
-                    continue
-                # If it contains amounts, extract them
-                line_amounts = re.findall(amount_pattern, next_line)
-                if line_amounts and not amounts:
-                    amounts = line_amounts
-                    # Get narration before amounts
-                    first_amount_pos = next_line.find(line_amounts[0])
-                    if first_amount_pos > 0:
-                        narration_parts.append(next_line[:first_amount_pos].strip())
-                elif not line_amounts and not any(x in next_line for x in ['Cr', 'Dr', 'DATE', 'NARRATION']):
-                    # This is narration continuation
-                    narration_parts.append(next_line)
-                i += 1
-                # Don't go too far
-                if len(narration_parts) > 3:
-                    break
-
+            # Get amounts from this line
+            amounts = re.findall(amount_pattern, rest)
             if not amounts:
+                i += 1
                 continue
+
+            # Check if this is a credit transaction (has "Cr" suffix)
+            is_credit = 'Cr' in line
+
+            # Narration comes from the PREVIOUS line(s)
+            narration_parts = []
+
+            # Look backwards for narration (lines before the date line)
+            j = i - 1
+            while j >= 0:
+                prev_line = lines[j].strip()
+                # Stop if we hit another date line or empty/header lines
+                if re.match(date_pattern, prev_line):
+                    break
+                if not prev_line or 'Page' in prev_line or 'DATE' in prev_line or 'NARRATION' in prev_line:
+                    break
+                if 'Opening Balance' in prev_line or 'Closing Balance' in prev_line:
+                    break
+                if 'SAVINGS ACCOUNT' in prev_line:
+                    break
+                # This is part of the narration
+                narration_parts.insert(0, prev_line)
+                j -= 1
+                # Don't go too far back
+                if len(narration_parts) >= 2:
+                    break
+
+            # Also check the next line for reference number continuation
+            if i + 1 < len(lines):
+                next_line = lines[i + 1].strip()
+                if next_line and not re.match(date_pattern, next_line):
+                    if not any(x in next_line for x in ['Page', 'Balance', 'DATE', 'NARRATION', 'SAVINGS ACCOUNT']):
+                        # Check if it's a reference number (no amounts)
+                        if not re.search(amount_pattern, next_line):
+                            narration_parts.append(next_line)
 
             narration = ' '.join(narration_parts).strip()
             if not narration:
+                i += 1
                 continue
-
-            # Determine if it's a debit or credit based on position/count of amounts
-            # In BOB format: WITHDRAWAL (DR) | DEPOSIT (CR) | BALANCE
-            # If there are 3 amounts: withdrawal, deposit, balance (one of first two is the transaction)
-            # If there are 2 amounts: one is transaction, one is balance
-            # The balance always has "Cr" suffix in original text
-
-            # Simple heuristic: if narration suggests credit (NEFT, Int.Pd, ACHCR, dividend)
-            is_credit = any(x in narration.upper() for x in ['NEFT', 'INT.PD', 'ACHCR', 'DIVIDEND', 'CREDIT'])
 
             # Take first amount as the transaction amount
             amount = amounts[0]
@@ -175,6 +169,8 @@ class BOBExtractor:
                 'Type': txn_type,
                 'Category': category
             })
+
+            i += 1
 
         return transactions
 

@@ -63,7 +63,8 @@ class PDFTableExtractor:
                 page_transactions = []
                 
                 # Try table extraction first (works best for page 2)
-                tables = page.extract_tables({"vertical_strategy": "text", "horizontal_strategy": "text"})
+                # Use default settings - text strategy causes column misalignment
+                tables = page.extract_tables()
                 
                 if tables:
                     print(f"Page {page_num}: Found {len(tables)} table(s)")
@@ -78,24 +79,14 @@ class PDFTableExtractor:
                             page_transactions.append(df)
                             print(f"  Table {table_idx}: Extracted {len(df)} transactions")
                 
-                # Only extract from raw text if table extraction didn't yield good results
-                # (for page 1 which doesn't have a proper table)
-                if not page_transactions:  # No transactions from table extraction
-                    text = page.extract_text()
-                    if text:
-                        df_text = self._extract_from_text(text)
-                        if df_text is not None and not df_text.empty:
-                            page_transactions.append(df_text)
-                            print(f"  Text extraction: Found {len(df_text)} transactions")
-                else:
-                    # We already got transactions from table, but try text extraction
-                    # only for rows that might have been missed (e.g., on page 1)
-                    text = page.extract_text()
-                    if text and page_num == 1:  # For page 1, combine both methods
-                        df_text = self._extract_from_text(text)
-                        if df_text is not None and not df_text.empty:
-                            page_transactions.append(df_text)
-                            print(f"  Text extraction: Found {len(df_text)} transactions")
+                # Always use text extraction - it's more reliable for ICICI statements
+                # Table extraction often misses rows due to PDF structure
+                text = page.extract_text()
+                if text:
+                    df_text = self._extract_from_text(text)
+                    if df_text is not None and not df_text.empty:
+                        page_transactions.append(df_text)
+                        print(f"  Text extraction: Found {len(df_text)} transactions")
                 
                 all_transactions.extend(page_transactions)
             
@@ -103,7 +94,8 @@ class PDFTableExtractor:
             if all_transactions:
                 merged_df = pd.concat(all_transactions, ignore_index=True)
                 # Remove duplicates based on SerNo (transaction ID)
-                merged_df = merged_df.drop_duplicates(subset=['SerNo.'], keep='first')
+                # Use keep='last' to prefer text-extracted rows (more reliable) over table-extracted
+                merged_df = merged_df.drop_duplicates(subset=['SerNo.'], keep='last')
                 
                 self.tables.append(merged_df)
                 self.table_schemas.append(tuple(merged_df.columns))
@@ -156,32 +148,41 @@ class PDFTableExtractor:
                 continue
             
             # From rest_of_line, extract description, points, and amount
-            # The rest contains: Description + "IN/CR" + Points + Amount
-            
+            # The rest contains: Description + "IN/CR" + Points + Amount [CR]
+
+            # Check if this is a credit transaction (ends with CR)
+            is_credit = rest_of_line.strip().endswith('CR')
+            if is_credit:
+                rest_of_line = rest_of_line.strip()[:-2].strip()  # Remove trailing CR
+
             # Find the last numeric value with decimals (amount)
             amount_match = None
             for match_obj in re.finditer(r'([\d,]+\.?\d*)', rest_of_line):
                 amount_match = match_obj
-            
+
             if not amount_match:
                 continue
-            
+
             amount = amount_match.group(1)
+            # Add CR suffix to amount if it's a credit
+            if is_credit:
+                amount = amount + ' CR'
+
             before_amount = rest_of_line[:amount_match.start()].strip()
-            
+
             # Try to extract points (last number in before_amount)
-            points_match = re.search(r'\s(\d+)\s*$', before_amount)
+            points_match = re.search(r'\s(-?\d+)\s*$', before_amount)
             if points_match:
                 points = points_match.group(1)
                 description = before_amount[:points_match.start()].strip()
             else:
                 points = ""
                 description = before_amount
-            
-            # Clean description - remove IN/CR flags
+
+            # Clean description - remove IN/CR flags from middle of description
             description = re.sub(r'\s+(IN|CR)\s*$', '', description).strip()
             description = " ".join(description.split())
-            
+
             # Validate we have required fields
             if len(description) > 0 and len(amount) > 0:
                 transactions.append({
@@ -241,22 +242,26 @@ class PDFTableExtractor:
                     points = ""
                     amount = ""
                     intl_amount = ""
-                    
+
                     # Look for numeric values in the remaining cells
                     for cell in row[5:]:
                         cell = cell.strip()
                         if not cell:
                             continue
-                        # Check if it's a decimal number (amount)
-                        if re.match(r'^[\d,]+\.?\d*$', cell):
+                        # Check if it's a decimal number (amount), possibly with CR suffix
+                        # Match: 123.45, 1,234.56, 123.45 CR
+                        amount_match = re.match(r'^([\d,]+\.?\d*)\s*(CR)?$', cell, re.IGNORECASE)
+                        if amount_match:
+                            num_part = amount_match.group(1)
+                            is_credit = amount_match.group(2) is not None
                             # Could be points or amount
-                            if '.' in cell or ',' in cell:
-                                amount = cell  # Has decimal, it's amount
+                            if '.' in num_part or ',' in num_part:
+                                amount = num_part + (' CR' if is_credit else '')  # Has decimal, it's amount
                             elif not points and not amount:
-                                points = cell  # First number without decimals is points
+                                points = num_part  # First number without decimals is points
                             elif not amount:
-                                amount = cell
-                    
+                                amount = num_part + (' CR' if is_credit else '')
+
                     # Validate we have the essential fields
                     if serno and details and amount:
                         # Date is optional for table extraction (text extraction handles it better)
