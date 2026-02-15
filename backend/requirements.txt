@@ -1,0 +1,8 @@
+fastapi
+uvicorn[standard]
+sqlmodel
+pandas
+pdfplumber
+python-multipart
+# requests (optional, but good to have)
+httpx
