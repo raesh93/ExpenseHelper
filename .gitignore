@@ -7,6 +7,7 @@ venv/
 
 # Output
 output/
+uploads/
 
 # Sensitive PDFs
 encrypted_pdf/*.pdf
