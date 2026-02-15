@@ -1,6 +1,5 @@
 """
 HDFC Credit Card Statement Extraction
-Extracts transactions from HDFC credit card PDF statements.
 """
 
 import re
@@ -8,21 +7,25 @@ from pathlib import Path
 from typing import List
 import pandas as pd
 
-from utils import open_pdf, categorize_transaction, save_results
+from .base import CreditCardExtractor
 
 
-class HDFCCCExtractor:
+class HDFCCCExtractor(CreditCardExtractor):
     """Extract transactions from HDFC credit card statements."""
 
+    # File patterns this extractor handles
+    FILE_PATTERNS = ["5241*"]
+    BANK_NAME = "HDFC CC"
+
     def __init__(self, pdf_path: str):
-        self.pdf_path = pdf_path
+        super().__init__(pdf_path)
         self.transactions: List[dict] = []
 
     def extract_transactions(self) -> pd.DataFrame:
         """Extract all transactions from the PDF."""
         print(f"Extracting from: {self.pdf_path}")
 
-        with open_pdf(self.pdf_path) as pdf:
+        with self.open_pdf() as pdf:
             print(f"Total pages: {len(pdf.pages)}")
 
             for page_num, page in enumerate(pdf.pages, 1):
@@ -51,8 +54,6 @@ class HDFCCCExtractor:
         """Parse transactions from table rows."""
         transactions = []
 
-        # Pattern to extract date, amount from messy cell text
-        # Format: "Description\nDD/MM/YYYY| HH:MM [+] C amount l\nRef#..."
         date_pattern = r'(\d{2}/\d{2}/\d{4})\|'
         amount_pattern = r'(\+)?\s*C\s*([\d,]+\.?\d*)\s*l'
 
@@ -64,14 +65,12 @@ class HDFCCCExtractor:
             if not cell_text:
                 continue
 
-            # Extract date
             date_match = re.search(date_pattern, cell_text)
             if not date_match:
                 continue
 
             date_str = date_match.group(1)
 
-            # Extract amount and credit indicator
             amount_match = re.search(amount_pattern, cell_text)
             if not amount_match:
                 continue
@@ -79,26 +78,21 @@ class HDFCCCExtractor:
             is_credit = amount_match.group(1) == '+'
             amount = amount_match.group(2).replace(',', '')
 
-            # Extract description (first line, cleaned up)
             lines = cell_text.split('\n')
             description = lines[0].strip()
 
-            # Clean up description - remove card holder name if it's at start
             if description.isupper() and len(description.split()) <= 3:
-                # Likely a name, use second line
                 if len(lines) > 1:
                     description = lines[1].split('(Ref#')[0].strip()
             else:
                 description = description.split('(Ref#')[0].strip()
 
-            # Skip if description looks like header
             if 'DATE' in description or 'TRANSACTION' in description:
                 continue
 
             txn_type = 'Credit' if is_credit else 'Debit'
-            category = categorize_transaction(description)
+            category = self.categorize_transaction(description)
 
-            # Convert amount to float
             try:
                 amount_float = float(amount)
             except ValueError:
@@ -114,20 +108,14 @@ class HDFCCCExtractor:
 
         return transactions
 
-    def save_results(self, df: pd.DataFrame, output_dir: str = "output"):
-        """Save the extracted transactions."""
-        save_results(df, self.pdf_path, output_dir)
-
 
 def main():
     """Main execution."""
     pdf_dir = Path("encrypted_pdf")
-
-    # HDFC CC pattern: 5241XXXXXXXXXX99_*
     pdf_files = list(pdf_dir.glob("5241*.pdf"))
 
     if not pdf_files:
-        print("No HDFC credit card PDF files found in 'encrypted_pdf' folder.")
+        print("No HDFC credit card PDF files found.")
         return
 
     for pdf_file in pdf_files:
@@ -140,7 +128,6 @@ def main():
 
         if not df.empty:
             extractor.save_results(df)
-            print(f"\nProcessing complete for {pdf_file.name}")
 
 
 if __name__ == "__main__":

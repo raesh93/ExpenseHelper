@@ -12,27 +12,8 @@ from datetime import datetime
 from pdf2image import convert_from_path
 import pdfplumber
 
-# Import extractors
-from extract_tables import PDFTableExtractor
-from extract_kotak import KotakExtractor
-from extract_kotak_cc import KotakCCExtractor
-from extract_hdfc_cc import HDFCCCExtractor
-from extract_sbi_cc import SBICCExtractor
-from extract_bob import BOBExtractor
-from extract_niyo_dcb import NiyoDCBExtractor
-from run_all_extractors import get_extractor_for_file, get_password_from_filename
-
-# Bank to extractor mapping
-BANK_EXTRACTOR_MAP = {
-    "HDFC CC": HDFCCCExtractor,
-    "SBI CC": SBICCExtractor,
-    "BOB Debit": BOBExtractor,
-    "Niyo DCB": NiyoDCBExtractor,
-    "ICICI Coral CC": PDFTableExtractor,
-    "Amazon ICICI CC": PDFTableExtractor,
-    "Kotak CC": KotakCCExtractor,
-    "Kotak Debit": KotakExtractor,
-}
+from extractors import BANK_EXTRACTOR_MAP, BaseExtractor, ICICICCExtractor
+from cli import get_extractor_for_file
 
 ISSUE_TAGS = [
     "",
@@ -63,18 +44,17 @@ def get_pdf_page_count(pdf_path: str, password: str = None) -> int:
         else:
             with pdfplumber.open(pdf_path) as pdf:
                 return len(pdf.pages)
-    except:
+    except Exception:
         try:
             with pdfplumber.open(pdf_path, password=password) as pdf:
                 return len(pdf.pages)
-        except:
+        except Exception:
             return 0
 
 
 def render_pdf_page(pdf_path: str, page_num: int, password: str = None):
     """Render a specific page of the PDF as an image."""
     try:
-        # Try without password first (for unencrypted PDFs)
         try:
             images = convert_from_path(
                 pdf_path,
@@ -84,10 +64,9 @@ def render_pdf_page(pdf_path: str, page_num: int, password: str = None):
             )
             if images:
                 return images[0]
-        except:
+        except Exception:
             pass
 
-        # Try with user password
         if password:
             try:
                 images = convert_from_path(
@@ -99,10 +78,9 @@ def render_pdf_page(pdf_path: str, page_num: int, password: str = None):
                 )
                 if images:
                     return images[0]
-            except:
+            except Exception:
                 pass
 
-            # Try with owner password (some PDFs use this instead)
             try:
                 images = convert_from_path(
                     pdf_path,
@@ -113,10 +91,9 @@ def render_pdf_page(pdf_path: str, page_num: int, password: str = None):
                 )
                 if images:
                     return images[0]
-            except:
+            except Exception:
                 pass
 
-            # Try with both user and owner password
             images = convert_from_path(
                 pdf_path,
                 first_page=page_num,
@@ -135,47 +112,31 @@ def render_pdf_page(pdf_path: str, page_num: int, password: str = None):
 def run_extraction(extractor) -> pd.DataFrame:
     """Run extraction and return normalized DataFrame."""
     try:
-        if hasattr(extractor, 'extract_transactions'):
+        if isinstance(extractor, ICICICCExtractor):
+            tables = extractor.extract_tables()
+            df = tables[0] if tables else pd.DataFrame()
+        elif hasattr(extractor, 'extract_transactions'):
             df = extractor.extract_transactions()
-            print(f"[DEBUG] extract_transactions returned {len(df) if df is not None else 'None'} rows")
         else:
             tables = extractor.extract_tables()
             df = tables[0] if tables else pd.DataFrame()
-            print(f"[DEBUG] extract_tables returned {len(tables) if tables else 0} tables")
 
         if df is None or df.empty:
             return pd.DataFrame()
 
-        # Normalize column names (handle None values)
         df.columns = [str(col).strip() if col is not None else f'col_{i}' for i, col in enumerate(df.columns)]
-
-        # Rename common columns to standard names
-        rename_map = {
-            'Transaction Details': 'Description',
-        }
-        df = df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns})
 
         # Handle ICICI-style Amount with CR suffix
         if 'Amount (in`)' in df.columns:
             amount_col = df['Amount (in`)'].fillna('').astype(str)
-            # Detect Credit transactions (ends with CR)
             is_credit = amount_col.str.strip().str.endswith('CR')
-            # Clean amount - remove CR and commas
             clean_amount = amount_col.str.replace('CR', '', case=False, regex=False).str.replace(',', '', regex=False).str.strip()
             df['Amount'] = pd.to_numeric(clean_amount, errors='coerce').fillna(0)
-            # Set Type based on CR suffix
             df['Type'] = is_credit.map({True: 'Credit', False: 'Debit'})
-        elif 'Amount' in df.columns and ('Type' not in df.columns or df['Type'].isna().all() or (df['Type'] == '').all()):
-            # Check if Amount has CR suffix
-            amount_col = df['Amount'].fillna('').astype(str)
-            if amount_col.str.contains('CR', case=False, na=False).any():
-                is_credit = amount_col.str.strip().str.endswith('CR')
-                clean_amount = amount_col.str.replace('CR', '', case=False, regex=False).str.replace(',', '', regex=False).str.strip()
-                df['Amount'] = pd.to_numeric(clean_amount, errors='coerce').fillna(0)
-                df['Type'] = is_credit.map({True: 'Credit', False: 'Debit'})
+            if 'Transaction Details' in df.columns:
+                df = df.rename(columns={'Transaction Details': 'Description'})
 
-        # Ensure standard columns exist
-        standard_cols = ['Date', 'Description', 'Amount', 'Type']
+        standard_cols = ['Date', 'Description', 'Amount', 'Type', 'Category']
         for col in standard_cols:
             if col not in df.columns:
                 df[col] = ''
@@ -205,28 +166,23 @@ with st.sidebar:
     uploaded_file = st.file_uploader("Choose a PDF file", type="pdf")
 
     if uploaded_file:
-        # Save to temp directory but keep original filename for password extraction
         temp_dir = tempfile.mkdtemp()
         temp_path = os.path.join(temp_dir, uploaded_file.name)
         with open(temp_path, 'wb') as f:
             f.write(uploaded_file.getvalue())
 
-        # Store in session state
         st.session_state['temp_path'] = temp_path
         st.session_state['filename'] = uploaded_file.name
 
-        # Extract password from original filename
-        password = get_password_from_filename(uploaded_file.name)
+        password = BaseExtractor.get_password_from_filename(uploaded_file.name)
         st.session_state['password'] = password
 
-        # Auto-detect bank type
         detected_class, detected_bank = get_extractor_for_file(uploaded_file.name)
 
         st.success(f"Uploaded: {uploaded_file.name}")
         st.info(f"Detected: **{detected_bank}**")
         st.text(f"Password: {password}")
 
-        # Bank type override
         st.header("Bank Type")
         bank_options = list(BANK_EXTRACTOR_MAP.keys())
         default_idx = bank_options.index(detected_bank) if detected_bank in bank_options else 0
@@ -238,7 +194,6 @@ with st.sidebar:
         )
         st.session_state['selected_bank'] = selected_bank
 
-        # Extract button
         if st.button("Extract Transactions", type="primary"):
             st.session_state['run_extraction'] = True
 
@@ -249,10 +204,8 @@ if 'temp_path' in st.session_state and st.session_state.get('run_extraction'):
     password = st.session_state['password']
     selected_bank = st.session_state['selected_bank']
 
-    # Get page count
     page_count = get_pdf_page_count(temp_path, password)
 
-    # Run extraction
     with st.spinner("Extracting transactions..."):
         extractor_class = BANK_EXTRACTOR_MAP[selected_bank]
         extractor = extractor_class(temp_path)
@@ -261,13 +214,11 @@ if 'temp_path' in st.session_state and st.session_state.get('run_extraction'):
     if df.empty:
         st.warning("No transactions extracted. Try a different bank type.")
     else:
-        # Add issue columns
         if 'Issue Tag' not in df.columns:
             df['Issue Tag'] = ''
         if 'Notes' not in df.columns:
             df['Notes'] = ''
 
-        # Store in session state
         st.session_state['transactions_df'] = df
         st.session_state['page_count'] = page_count
 
@@ -280,13 +231,11 @@ if 'transactions_df' in st.session_state:
     password = st.session_state['password']
     page_count = st.session_state.get('page_count', 1)
 
-    # Create two columns
     col1, col2 = st.columns([1, 1])
 
     with col1:
         st.subheader("PDF Viewer")
 
-        # Page navigation
         nav_col1, nav_col2, nav_col3 = st.columns([1, 2, 1])
 
         with nav_col1:
@@ -314,7 +263,6 @@ if 'transactions_df' in st.session_state:
                 if st.session_state['current_page'] < page_count:
                     st.session_state['current_page'] += 1
 
-        # Render PDF page
         page_num = st.session_state.get('current_page', 1)
         img = render_pdf_page(temp_path, page_num, password)
         if img:
@@ -325,7 +273,6 @@ if 'transactions_df' in st.session_state:
     with col2:
         st.subheader("Extracted Transactions")
 
-        # Configure column settings for data editor
         column_config = {
             "Issue Tag": st.column_config.SelectboxColumn(
                 "Issue Tag",
@@ -344,7 +291,6 @@ if 'transactions_df' in st.session_state:
             )
         }
 
-        # Display editable table
         edited_df = st.data_editor(
             df,
             column_config=column_config,
@@ -353,14 +299,11 @@ if 'transactions_df' in st.session_state:
             num_rows="fixed"
         )
 
-        # Update session state with edits
         st.session_state['transactions_df'] = edited_df
 
-    # Feedback section
     st.divider()
     st.subheader("Feedback & Export")
 
-    # Show tagged issues count
     tagged_count = len(edited_df[edited_df['Issue Tag'] != ''])
     st.metric("Tagged Issues", tagged_count)
 
@@ -388,7 +331,6 @@ if 'transactions_df' in st.session_state:
             st.rerun()
 
 else:
-    # Welcome message
     st.info("Upload a PDF statement from the sidebar to get started.")
 
     st.markdown("""

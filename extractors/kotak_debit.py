@@ -1,28 +1,31 @@
 """
-Kotak Bank Statement Extraction
-Extracts transactions from Kotak Bank PDF statements.
+Kotak Bank Savings Account Statement Extraction
 """
 
 import re
 from pathlib import Path
+from datetime import datetime
 from typing import List, Optional
 import pandas as pd
 
-from utils import open_pdf, save_results
+from .base import DebitAccountExtractor
 
 
-class KotakExtractor:
-    """Extract transactions from Kotak Bank statements."""
+class KotakDebitExtractor(DebitAccountExtractor):
+    """Extract transactions from Kotak Bank savings account statements."""
+
+    FILE_PATTERNS = ["6006*", "27065*"]
+    BANK_NAME = "Kotak Debit"
 
     def __init__(self, pdf_path: str):
-        self.pdf_path = pdf_path
+        super().__init__(pdf_path)
         self.transactions: List[dict] = []
 
     def extract_transactions(self) -> pd.DataFrame:
         """Extract all transactions from the PDF."""
         print(f"Extracting from: {self.pdf_path}")
 
-        with open_pdf(self.pdf_path) as pdf:
+        with self.open_pdf() as pdf:
             print(f"Total pages: {len(pdf.pages)}")
 
             for page_num, page in enumerate(pdf.pages, 1):
@@ -40,12 +43,10 @@ class KotakExtractor:
             return pd.DataFrame()
 
         df = pd.DataFrame(self.transactions)
-        # Remove duplicates based on Date + Description + Amount (more reliable than Reference)
         df = df.drop_duplicates(subset=['Date', 'Description', 'Amount'], keep='first')
         print(f"\nTotal unique transactions: {len(df)}")
 
-        # Filter to savings account only (exclude term deposit transactions)
-        df = self.filter_savings_account(df)
+        df = self._filter_savings_account(df)
         print(f"Filtered to savings account: {len(df)} transactions")
 
         return df
@@ -55,10 +56,6 @@ class KotakExtractor:
         transactions = []
         lines = text.split('\n')
 
-        # Pattern for Kotak transactions:
-        # DD Mon, YYYY Description Reference DEBIT/CREDIT BALANCE
-        # Example: 01 Dec, 2025 UPI/ICCL - Mutual F/... UPI-533562653043 -5,000.00 44,101.52
-
         date_pattern = r'^(\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec),?\s+\d{4})'
 
         for line in lines:
@@ -66,7 +63,6 @@ class KotakExtractor:
             if not line:
                 continue
 
-            # Check if line starts with a date
             date_match = re.match(date_pattern, line)
             if not date_match:
                 continue
@@ -74,22 +70,15 @@ class KotakExtractor:
             date_str = date_match.group(1)
             rest = line[date_match.end():].strip()
 
-            # Skip header line
             if 'TRANSACTION DETAILS' in rest or 'CHEQUE/REFERENCE' in rest:
                 continue
-
-            # Skip opening/closing balance lines
             if 'OPENING BALANCE' in rest or 'Opening Balance' in rest:
                 continue
             if 'CLOSING BALANCE' in rest or 'Closing Balance' in rest:
                 continue
-
-            # Skip date range lines like "01 Dec, 2025 - 31 Dec, 2025"
-            # These start with " - DD Mon, YYYY" after removing first date
             if re.match(r'^\s*-\s*\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec),?\s+\d{4}\s*$', rest):
                 continue
 
-            # Parse the rest: Description Reference Amount Balance
             txn = self._parse_transaction_line(date_str, rest)
             if txn:
                 transactions.append(txn)
@@ -98,18 +87,14 @@ class KotakExtractor:
 
     def _parse_transaction_line(self, date_str: str, rest: str) -> Optional[dict]:
         """Parse a single transaction line."""
-        # Find amounts at the end (negative for debit, positive for credit)
-        # Pattern: -1,234.56 or +1,234.56 or 1,234.56
         amount_pattern = r'([+-]?[\d,]+\.\d{2})\s*$'
 
-        # Find balance (last amount)
         balance_match = re.search(amount_pattern, rest)
         if not balance_match:
             return None
 
         rest = rest[:balance_match.start()].strip()
 
-        # Find debit/credit amount (second to last amount)
         amount_match = re.search(amount_pattern, rest)
         if not amount_match:
             return None
@@ -117,28 +102,19 @@ class KotakExtractor:
         amount = amount_match.group(1)
         rest = rest[:amount_match.start()].strip()
 
-        # Check if there's another amount (credit column when debit is empty or vice versa)
-        # Some lines have: Description Reference -5000.00 (blank) 44101.52
-        # Others have: Description Reference (blank) +6076.02 45177.54
         another_amount = re.search(amount_pattern, rest)
         if another_amount:
-            # There was a third amount, so amount was actually balance
-            # and this is the real amount
             amount = another_amount.group(1)
             rest = rest[:another_amount.start()].strip()
 
-        # Now rest contains: Description Reference
-        # Reference patterns: UPI-XXXX, NACHDB..., NEFTINW-..., account numbers, etc.
         ref_pattern = r'(UPI-\d+|NACH\w+|NEFT\w+-\d+|\[\d+\]|\d{10,}TO|\d{10,})$'
         ref_match = re.search(ref_pattern, rest)
 
         if ref_match:
             description = rest[:ref_match.start()].strip()
         else:
-            # No standard reference found - use description as-is
             description = rest
 
-        # Clean up amount (remove + sign, keep - for debits)
         if amount.startswith('+'):
             amount = amount[1:]
             txn_type = 'Credit'
@@ -146,18 +122,14 @@ class KotakExtractor:
             amount = amount[1:]
             txn_type = 'Debit'
         else:
-            # Determine from balance change
             txn_type = 'Unknown'
 
-        # Convert date to DD/MM/YYYY format
         try:
-            from datetime import datetime
             dt = datetime.strptime(date_str, '%d %b, %Y')
             date_formatted = dt.strftime('%d/%m/%Y')
         except ValueError:
             date_formatted = date_str
 
-        # Clean amount and convert to float
         amount_clean = amount.replace(',', '')
         try:
             amount_float = float(amount_clean)
@@ -171,34 +143,28 @@ class KotakExtractor:
             'Type': txn_type
         }
 
-    def filter_savings_account(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Filter to only savings account transactions (exclude term deposit accounts)."""
-        # Term deposit patterns (pages 10-12)
+    def _filter_savings_account(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Filter to only savings account transactions."""
         term_patterns = ['Tran. For Principal', 'Sweep Trf To:', 'Closure Int After Tax',
                          'SWEEP TRANSFER FROM', 'Opening Balance', 'Closing Balance']
 
         def is_term_deposit(desc):
             return any(p in desc for p in term_patterns)
 
-        savings_df = df[~df['Description'].apply(is_term_deposit)]
-        return savings_df
+        return df[~df['Description'].apply(is_term_deposit)]
 
-    def save_results(self, df: pd.DataFrame, output_dir: str = "output"):
-        """Save the extracted transactions."""
-        save_results(df, self.pdf_path, output_dir)
+
+# Alias for backwards compatibility
+KotakExtractor = KotakDebitExtractor
 
 
 def main():
     """Main execution."""
-    # Look for Kotak PDFs - they typically have specific naming
     pdf_dir = Path("encrypted_pdf")
-
-    # Find PDFs that look like Kotak statements
     pdf_files = list(pdf_dir.glob("6006279*.pdf"))
 
     if not pdf_files:
-        print("No Kotak PDF files found in 'encrypted_pdf' folder.")
-        print("Looking for files matching: 6006279*.pdf")
+        print("No Kotak PDF files found.")
         return
 
     for pdf_file in pdf_files:
@@ -206,12 +172,11 @@ def main():
         print(f"Processing: {pdf_file.name}")
         print(f"{'='*60}")
 
-        extractor = KotakExtractor(str(pdf_file))
+        extractor = KotakDebitExtractor(str(pdf_file))
         df = extractor.extract_transactions()
 
         if not df.empty:
             extractor.save_results(df)
-            print(f"\nProcessing complete for {pdf_file.name}")
 
 
 if __name__ == "__main__":

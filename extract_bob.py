@@ -3,14 +3,12 @@ Bank of Baroda (BOB) Account Statement Extraction
 Extracts transactions from BOB savings account PDF statements.
 """
 
-import os
-import json
 import re
 from pathlib import Path
-from datetime import datetime
-import pdfplumber
-import pandas as pd
 from typing import List
+import pandas as pd
+
+from utils import open_pdf, convert_date, save_results
 
 
 class BOBExtractor:
@@ -20,38 +18,11 @@ class BOBExtractor:
         self.pdf_path = pdf_path
         self.transactions: List[dict] = []
 
-    def _get_password_from_filename(self) -> str:
-        """Extract password from filename (last segment after '_')."""
-        filename = Path(self.pdf_path).stem
-        parts = filename.split('_')
-        return parts[-1] if parts else ""
-
-    def _open_pdf(self):
-        """Open PDF, handling password-protected files."""
-        password = self._get_password_from_filename()
-
-        try:
-            pdf = pdfplumber.open(self.pdf_path)
-            _ = len(pdf.pages)
-            return pdf
-        except Exception:
-            pass
-
-        if password:
-            try:
-                pdf = pdfplumber.open(self.pdf_path, password=password)
-                print(f"  Opened with password from filename")
-                return pdf
-            except Exception as e:
-                raise Exception(f"Failed to open PDF: {e}")
-
-        raise Exception("Failed to open PDF - may be encrypted")
-
     def extract_transactions(self) -> pd.DataFrame:
         """Extract all transactions from the PDF."""
         print(f"Extracting from: {self.pdf_path}")
 
-        with self._open_pdf() as pdf:
+        with open_pdf(self.pdf_path) as pdf:
             print(f"Total pages: {len(pdf.pages)}")
 
             full_text = ""
@@ -155,107 +126,32 @@ class BOBExtractor:
                 continue
 
             # Take first amount as the transaction amount
-            amount = amounts[0]
+            amount = amounts[0].replace(',', '')
             txn_type = 'Credit' if is_credit else 'Debit'
 
             # Convert date format
-            date_formatted = self._convert_date(date_str)
-            category = self._categorize(narration)
+            date_formatted = convert_date(date_str, '%d-%m-%Y')
+
+            # Convert amount to float
+            try:
+                amount_float = float(amount)
+            except ValueError:
+                amount_float = 0.0
 
             transactions.append({
                 'Date': date_formatted,
                 'Description': narration,
-                'Amount': amount,
-                'Type': txn_type,
-                'Category': category
+                'Amount': amount_float,
+                'Type': txn_type
             })
 
             i += 1
 
         return transactions
 
-    def _convert_date(self, date_str: str) -> str:
-        """Convert 'DD-MM-YYYY' to 'DD/MM/YYYY'."""
-        return date_str.replace('-', '/')
-
-    def _categorize(self, description: str) -> str:
-        """Categorize transaction based on description."""
-        desc_upper = description.upper()
-
-        if 'INT.PD' in desc_upper or 'INTEREST' in desc_upper:
-            return 'Interest'
-        elif 'DIVIDEND' in desc_upper:
-            return 'Dividend'
-        elif 'NEFT' in desc_upper:
-            return 'NEFT Transfer'
-        elif 'ACHCR' in desc_upper:
-            return 'Dividend/Credit'
-        elif 'UPI' in desc_upper:
-            return 'UPI'
-        elif 'ATM' in desc_upper:
-            return 'ATM'
-        elif 'IMPS' in desc_upper:
-            return 'IMPS'
-
-        return 'Other'
-
     def save_results(self, df: pd.DataFrame, output_dir: str = "output"):
         """Save the extracted transactions."""
-        if df.empty:
-            return
-
-        pdf_name = Path(self.pdf_path).stem
-        output_folder = os.path.join(output_dir, pdf_name)
-        os.makedirs(output_folder, exist_ok=True)
-
-        # Sort by date
-        try:
-            df = df.copy()
-            df['_date'] = pd.to_datetime(df['Date'], format='%d/%m/%Y')
-            df = df.sort_values('_date')
-            df = df.drop('_date', axis=1)
-        except Exception:
-            pass
-
-        # Save CSV
-        csv_path = os.path.join(output_folder, "transactions.csv")
-        df.to_csv(csv_path, index=False)
-        print(f"Saved to {csv_path}")
-
-        # Save Excel
-        excel_path = os.path.join(output_folder, "transactions.xlsx")
-        df.to_excel(excel_path, index=False)
-        print(f"Saved to {excel_path}")
-
-        # Print summary
-        print(f"\nSummary:")
-        print(f"  Total transactions: {len(df)}")
-        print(f"  Debits: {len(df[df['Type'] == 'Debit'])}")
-        print(f"  Credits: {len(df[df['Type'] == 'Credit'])}")
-
-        # Calculate totals
-        df_copy = df.copy()
-        df_copy['_amount'] = df_copy['Amount'].str.replace(',', '').astype(float)
-        total_credit = df_copy[df_copy['Type'] == 'Credit']['_amount'].sum()
-        total_debit = df_copy[df_copy['Type'] == 'Debit']['_amount'].sum()
-        print(f"  Total Credits: {total_credit:.2f}")
-        print(f"  Total Debits: {total_debit:.2f}")
-
-        # Save summary JSON
-        summary = {
-            "extraction_timestamp": datetime.now().isoformat(),
-            "source_pdf": self.pdf_path,
-            "total_transactions": len(df),
-            "debits": len(df[df['Type'] == 'Debit']),
-            "credits": len(df[df['Type'] == 'Credit']),
-            "total_credit_amount": total_credit,
-            "total_debit_amount": total_debit,
-            "columns": list(df.columns)
-        }
-        summary_path = os.path.join(output_folder, "summary.json")
-        with open(summary_path, 'w') as f:
-            json.dump(summary, f, indent=2)
-        print(f"Saved summary to {summary_path}")
+        save_results(df, self.pdf_path, output_dir)
 
 
 def main():

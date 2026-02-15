@@ -1,6 +1,5 @@
 """
 Kotak Credit Card Statement Extraction
-Extracts transactions from Kotak credit card PDF statements.
 """
 
 import re
@@ -8,21 +7,24 @@ from pathlib import Path
 from typing import List
 import pandas as pd
 
-from utils import open_pdf, categorize_transaction, save_results
+from .base import CreditCardExtractor
 
 
-class KotakCCExtractor:
+class KotakCCExtractor(CreditCardExtractor):
     """Extract transactions from Kotak credit card statements."""
 
+    FILE_PATTERNS = ["00114*", "00116*"]
+    BANK_NAME = "Kotak CC"
+
     def __init__(self, pdf_path: str):
-        self.pdf_path = pdf_path
+        super().__init__(pdf_path)
         self.transactions: List[dict] = []
 
     def extract_transactions(self) -> pd.DataFrame:
         """Extract all transactions from the PDF."""
         print(f"Extracting from: {self.pdf_path}")
 
-        with open_pdf(self.pdf_path) as pdf:
+        with self.open_pdf() as pdf:
             print(f"Total pages: {len(pdf.pages)}")
 
             for page_num, page in enumerate(pdf.pages, 1):
@@ -40,7 +42,6 @@ class KotakCCExtractor:
             return pd.DataFrame()
 
         df = pd.DataFrame(self.transactions)
-        # Include Type in deduplication - same amount can be both debit and credit (refund)
         df = df.drop_duplicates(subset=['Date', 'Description', 'Amount', 'Type'], keep='first')
         print(f"\nTotal unique transactions: {len(df)}")
 
@@ -51,7 +52,6 @@ class KotakCCExtractor:
         transactions = []
         lines = text.split('\n')
 
-        # Pattern: DD/MM/YYYY Description Amount [Cr]
         date_pattern = r'^(\d{2}/\d{2}/\d{4})\s+(.+?)\s+([\d,]+\.\d{2})(\s+Cr)?$'
 
         for line in lines:
@@ -68,17 +68,12 @@ class KotakCCExtractor:
             amount = match.group(3).replace(',', '')
             is_credit = match.group(4) is not None
 
-            # Skip summary lines
             if 'TotalPurchase' in description or 'TotalAmount' in description:
                 continue
 
-            # Determine transaction type
             txn_type = 'Credit' if is_credit else 'Debit'
+            category = self.categorize_transaction(description)
 
-            # Categorize transaction
-            category = categorize_transaction(description)
-
-            # Convert amount to float
             try:
                 amount_float = float(amount)
             except ValueError:
@@ -94,21 +89,14 @@ class KotakCCExtractor:
 
         return transactions
 
-    def save_results(self, df: pd.DataFrame, output_dir: str = "output"):
-        """Save the extracted transactions."""
-        save_results(df, self.pdf_path, output_dir)
-
 
 def main():
     """Main execution."""
     pdf_dir = Path("encrypted_pdf")
-
-    # Find Kotak credit card PDFs (they have different naming pattern)
-    # Pattern: 00114452-XXXXXXXXX..._password.pdf
     pdf_files = list(pdf_dir.glob("00114452*.pdf"))
 
     if not pdf_files:
-        print("No Kotak credit card PDF files found in 'encrypted_pdf' folder.")
+        print("No Kotak credit card PDF files found.")
         return
 
     for pdf_file in pdf_files:
@@ -121,7 +109,6 @@ def main():
 
         if not df.empty:
             extractor.save_results(df)
-            print(f"\nProcessing complete for {pdf_file.name}")
 
 
 if __name__ == "__main__":
