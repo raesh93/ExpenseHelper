@@ -1,4 +1,5 @@
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 from backend.app.core.db import create_db_and_tables
 from backend.app.api.routes import upload, transactions, stats, files
@@ -9,6 +10,14 @@ async def lifespan(app: FastAPI):
     yield
 
 app = FastAPI(lifespan=lifespan)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Allows all origins
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 app.include_router(upload.router, prefix="/upload", tags=["Upload"])
 app.include_router(transactions.router, prefix="/transactions", tags=["Transactions"])
